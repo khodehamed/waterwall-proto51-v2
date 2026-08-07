@@ -5,7 +5,7 @@
 #   sudo bash /tmp/ww51v2-install.sh
 #
 # Isolated from v1: different dir, systemd unit, menu (ww51v2), tun (wtun2), subnet 10.10.1.0/24,
-# default ports, PORT_OFFSET=11000. Does NOT stop or modify waterwall-proto51 / wtun0.
+# default ports match v1 (443 2053 …); PORT_OFFSET=10000. Does NOT stop or modify waterwall-proto51 / wtun0.
 #
 set -euo pipefail
 
@@ -159,10 +159,10 @@ normalize_ports() {
 
 # When ENCRYPT=1, AEAD hops use INTERNAL_PORT = PUBLIC_PORT + PORT_OFFSET on the TUN.
 # Public panel ports stay untouched on Kharej (panel may keep 0.0.0.0:PUBLIC_PORT).
-PORT_OFFSET_DEFAULT=11000
+PORT_OFFSET_DEFAULT=10000
 PORT_OFFSET="${PORT_OFFSET:-$PORT_OFFSET_DEFAULT}"
-# Default PUBLIC forward ports for v2 (must NOT overlap v1 defaults: 443 2053 2083 2087 2096 8443).
-DEFAULT_PORTS="8444 2054 2084 2088 2097 9443"
+# Same PUBLIC forward ports as v1 — OK when v2 Iran is a different host (warn if v1 on same Iran box).
+DEFAULT_PORTS="443 2053 2083 2087 2096 8443"
 
 detect_public_ip() {
   # Best-effort public IPv4 for Status + install/edit defaults (override always allowed).
@@ -1184,7 +1184,7 @@ edit_tunnel() {
   echo -e "${CYN}Encryption${NC} (official WaterWall AEAD nodes — NOT the removed AesGcm plugin)"
   echo "  Iran  : TcpListener(0.0.0.0:PUBLIC) -> EncryptionClient -> TcpConnector(${TUN_PEER}:INTERNAL)"
   echo "  Kharej: TcpListener(${TUN_LOCAL}:INTERNAL) -> EncryptionServer -> TcpConnector(127.0.0.1:PUBLIC)"
-  echo "  INTERNAL = PUBLIC + PORT_OFFSET (default ${PORT_OFFSET_DEFAULT}; e.g. 8444 -> $((8444 + PORT_OFFSET_DEFAULT)))"
+  echo "  INTERNAL = PUBLIC + PORT_OFFSET (default ${PORT_OFFSET_DEFAULT}; e.g. 443 -> $((443 + PORT_OFFSET_DEFAULT)))"
   echo "  Iran MAY use 0.0.0.0 WITH encryption — that is fine."
   echo "  Kharej panel may stay on 0.0.0.0:PUBLIC — installer never moves panel/x-ui."
   echo "  Docs  : https://radkesvat.github.io/WaterWall-Docs/docs/noderefs/EncryptionClient"

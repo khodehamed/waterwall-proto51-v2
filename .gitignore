@@ -1,0 +1,12 @@
+*.log
+log/
+Waterwall
+libs/
+*.zip
+.DS_Store
+_diag_*
+_diag*
+_fix_*
+_live_*
+*.pem
+*.key

@@ -1073,9 +1073,8 @@ apply_tunnel_config() {
   local mtu
 
   PORT_OFFSET="$offset"
-  # Both ends must use the same MTU. A higher MTU on Kharej makes it
-  # send TCP segments that Iran's tun drops, so handshakes stall.
-  mtu=1320
+  # Both ends use the same MTU.
+  mtu=1380
 
   if [[ "$encrypt" == "1" ]]; then
     resolve_encryption_or_fallback "$encrypt" "$key" "$oldcpu"
@@ -1435,9 +1434,8 @@ prompt_install() {
     *) oldcpu=0 ;;
   esac
 
-  # Both ends must use the same MTU. A higher MTU on Kharej makes it
-  # send TCP segments that Iran's tun drops, so handshakes stall.
-  mtu=1320
+  # Both ends use the same MTU.
+  mtu=1380
 
   msg "Starting install for side=${side}..."
   ensure_deps

@@ -251,7 +251,8 @@ warn_v1_port_overlap() {
 
 ports_busy_report() {
   # Print busy listen lines for each port (any local address). Return 0 if any busy.
-  # On Linux, a listener on *:PORT / 0.0.0.0:PORT also blocks bind to 10.10.0.1:PORT.
+  # Used for Iran PUBLIC binds (0.0.0.0). Do NOT use this for Kharej INTERNAL hops:
+  # v1 already listens on 10.10.0.1:PUBLIC+OFFSET and that does not block v2 on 10.10.1.1.
   local ports="$1" p busy="" line
   command -v ss >/dev/null 2>&1 || return 1
   for p in $ports; do
@@ -259,6 +260,29 @@ ports_busy_report() {
     if [[ -n "$line" ]]; then
       busy+="  port ${p}: ${line}"$'\n'
     fi
+  done
+  if [[ -n "$busy" ]]; then
+    printf '%s' "$busy"
+    return 0
+  fi
+  return 1
+}
+
+ports_busy_on_addr() {
+  # Busy only if something already owns ADDR:PORT or a wildcard *:PORT / 0.0.0.0:PORT.
+  # Other unicast IPs (v1 EncryptionServer on 10.10.0.1) are ignored — same port is OK.
+  local ports="$1" addr="${2:-}" p busy="" line local_ep
+  command -v ss >/dev/null 2>&1 || return 1
+  for p in $ports; do
+    while IFS= read -r line; do
+      [[ -n "$line" ]] || continue
+      local_ep="$(awk '{print $4}' <<<"$line")"
+      case "$local_ep" in
+        "${addr}:${p}"|"0.0.0.0:${p}"|"*:${p}"|"[::]:${p}"|"[::0]:${p}")
+          busy+="  port ${p}: ${line}"$'\n'
+          ;;
+      esac
+    done < <(ss -lntH "sport = :$p" 2>/dev/null || true)
   done
   if [[ -n "$busy" ]]; then
     printf '%s' "$busy"
@@ -280,41 +304,53 @@ assert_ports_free() {
 }
 
 warn_kharej_internal_port_conflict() {
-  # INTERNAL hop ports busy — do NOT ask user to free panel PUBLIC ports.
+  # INTERNAL hop ports busy ON TUN_LOCAL — do NOT ask user to free panel PUBLIC ports.
   local busy="$1" offset="${2:-$PORT_OFFSET}"
   warn "============================================================"
-  warn "Kharej encryption binds INTERNAL ports on ${TUN_LOCAL}:"
+  warn "Kharej encryption binds INTERNAL ports on ${TUN_LOCAL} only:"
   warn "  INTERNAL_PORT = PUBLIC_PORT + PORT_OFFSET (PORT_OFFSET=${offset})"
-  warn "These INTERNAL ports are already in use:"
+  warn "These INTERNAL ports are already in use on ${TUN_LOCAL} or *:"
   echo -e "$busy" >&2
+  warn "v1 listeners on 10.10.0.1 are NOT a conflict (different TUN IP)."
   warn "Panel PUBLIC ports are fine (panel may stay on 0.0.0.0)."
-  warn "This installer will NOT touch x-ui/xray/nginx/panel."
-  warn "Auto-fallback: ENCRYPT=0 so the packet tunnel stays UP."
-  warn "EN: Free the INTERNAL ports, or change PORT_OFFSET in tunnel.env, then:"
-  warn "    sudo ww51v2 edit (encrypt=y)."
-  warn "FA: پورت‌های داخلی تانل اشغال‌اند؛ پنل را جابه‌جا نکنید."
+  warn "This installer will NOT touch x-ui/xray/nginx/panel and will NOT set ENCRYPT=0."
   warn "============================================================"
 }
 
 resolve_kharej_encrypt_bind_or_fallback() {
-  # Kharej encrypt=1 binds INTERNAL ports only (PUBLIC+OFFSET), not panel PUBLIC ports.
-  # If INTERNAL ports are busy, force ENCRYPT_RESOLVED=0. Keep KEY_RESOLVED for retry.
-  local encrypt="$1" key="$2" ports="$3" offset="${4:-$PORT_OFFSET}" busy iports
+  # Kharej encrypt=1 binds INTERNAL ports only on TUN_LOCAL (PUBLIC+OFFSET).
+  # Never fall back to ENCRYPT=0: v1 already owns 10.10.0.1:same-ports; that is OK.
+  # If TUN_LOCAL internals are truly busy, bump PORT_OFFSET (Iran must match).
+  local encrypt="$1" key="$2" ports="$3" offset="${4:-$PORT_OFFSET}" busy iports try
   ENCRYPT_RESOLVED="$encrypt"
   KEY_RESOLVED="$key"
+  OFFSET_RESOLVED="$offset"
   [[ "$encrypt" == "1" ]] || return 0
   [[ -n "$ports" ]] || return 0
-  validate_ports_with_offset "$ports" "$offset" || {
-    warn "Invalid PUBLIC ports / PORT_OFFSET=${offset} (PUBLIC+OFFSET must be <= 65535)"
-    ENCRYPT_RESOLVED=0
+
+  for try in 1 2 3 4 5 6; do
+    if ! validate_ports_with_offset "$ports" "$offset"; then
+      offset=$((offset + 1000))
+      continue
+    fi
+    iports="$(internal_ports_list "$ports" "$offset")"
+    if busy="$(ports_busy_on_addr "$iports" "$TUN_LOCAL")"; then
+      warn_kharej_internal_port_conflict "$busy" "$offset"
+      warn "Keeping ENCRYPT=1; trying PORT_OFFSET=$((offset + 1000))"
+      offset=$((offset + 1000))
+      continue
+    fi
+    PORT_OFFSET="$offset"
+    OFFSET_RESOLVED="$offset"
+    ENCRYPT_RESOLVED=1
+    ok "Kharej encrypt INTERNAL free on ${TUN_LOCAL}: ${iports} (v1 10.10.0.1 ignored)"
     return 0
-  }
-  iports="$(internal_ports_list "$ports" "$offset")"
-  if busy="$(ports_busy_report "$iports")"; then
-    warn_kharej_internal_port_conflict "$busy" "$offset"
-    ENCRYPT_RESOLVED=0
-    return 0
-  fi
+  done
+
+  warn "Could not find a free INTERNAL PORT_OFFSET on ${TUN_LOCAL}; ENCRYPT stays 1 (no silent OFF)."
+  ENCRYPT_RESOLVED=1
+  OFFSET_RESOLVED="$offset"
+  PORT_OFFSET="$offset"
   return 0
 }
 
@@ -424,10 +460,8 @@ ensure_encryption_support() {
 }
 
 resolve_encryption_or_fallback() {
-  # If encrypt=1, probe algorithms. On failure: warn and force encrypt=0.
-  # Sets globals: ENC_ALGO, and echoes "encrypt key" via nameref-style globals
-  # Caller passes encrypt/key by name through globals ENCRYPT_RESOLVED / KEY_RESOLVED
-  # Actually: mutate caller's locals via eval-free pattern — return via globals.
+  # If user asked for encrypt=1, KEEP it. Never silent-OFF (that made menu 4 show current:N).
+  # Probe only selects algorithm. Missing AEAD strings → still write chacha20-poly1305.
   # Usage: resolve_encryption_or_fallback "$encrypt" "$key" "$oldcpu"
   #         then read ENCRYPT_RESOLVED KEY_RESOLVED
   local want="$1" key="$2" oldcpu="$3"
@@ -437,23 +471,24 @@ resolve_encryption_or_fallback() {
 
   if [[ "$want" != "1" ]]; then
     ENCRYPT_RESOLVED=0
-    KEY_RESOLVED=""
     return 0
   fi
+
+  ENCRYPT_RESOLVED=1
+  KEY_RESOLVED="$key"
+  ENC_ALGO="$ENC_ALGO_DEFAULT"
 
   if ensure_encryption_support "$oldcpu"; then
-    ENCRYPT_RESOLVED=1
-    KEY_RESOLVED="$key"
+    ENC_ALGO="${ENC_ALGO:-$ENC_ALGO_DEFAULT}"
+    [[ -n "$ENC_ALGO" ]] || ENC_ALGO="$ENC_ALGO_DEFAULT"
     return 0
   fi
 
   warn "============================================================"
-  warn "Encryption requested but no AEAD works on this crypto backend."
-  warn "Auto-fallback: installing WITHOUT encryption (service stays up)."
-  warn "Both Iran and Kharej must use the same encrypt setting."
+  warn "Crypto probe failed (old-cpu / missing AES-GCM strings). NOT turning encryption OFF."
+  warn "Forcing ENC_ALGO=${ENC_ALGO_DEFAULT}. Need WaterWall 1.46+ EncryptionClient/Server."
+  warn "If the binary truly lacks those nodes, journalctl -u ${SERVICE_NAME} will show it."
   warn "============================================================"
-  ENCRYPT_RESOLVED=0
-  KEY_RESOLVED=""
   ENC_ALGO="$ENC_ALGO_DEFAULT"
   return 0
 }
@@ -1099,6 +1134,8 @@ apply_tunnel_config() {
     resolve_kharej_encrypt_bind_or_fallback "$encrypt" "$key" "$ports" "$offset"
     encrypt="$ENCRYPT_RESOLVED"
     key="$KEY_RESOLVED"
+    offset="${OFFSET_RESOLVED:-$offset}"
+    PORT_OFFSET="$offset"
   fi
 
   write_core_json "$side" "$mtu"
@@ -1190,7 +1227,8 @@ edit_tunnel() {
   echo "  Kharej panel may stay on 0.0.0.0:PUBLIC — installer never moves panel/x-ui."
   echo "  Docs  : https://radkesvat.github.io/WaterWall-Docs/docs/noderefs/EncryptionClient"
   echo "  Algo  : auto-probe (prefer chacha20-poly1305; current saved: ${ENC_ALGO:-$ENC_ALGO_DEFAULT})"
-  echo "  Default OFF for safety. No libs/ plugin required (nodes are built into the binary)."
+  echo "  Empty Enter keeps current (${enc_prompt}). Type y to force ON — installer will not silent-OFF."
+  echo "  No libs/ plugin required (nodes are built into the binary)."
   read_tty -r -p "Enable EncryptionClient/Server? [y/N] (current: ${enc_prompt}): " tmp || true
   case "${tmp:-}" in
     y|Y|yes|YES) encrypt=1 ;;
@@ -1465,6 +1503,8 @@ prompt_install() {
       resolve_kharej_encrypt_bind_or_fallback "$encrypt" "$key" "$ports" "$offset"
       encrypt="$ENCRYPT_RESOLVED"
       key="$KEY_RESOLVED"
+      offset="${OFFSET_RESOLVED:-$offset}"
+      PORT_OFFSET="$offset"
     fi
     write_kharej_config "$iran_ip" "$kh_ip" "$proto" "$encrypt" "$key" "$ports" "$offset"
   fi
